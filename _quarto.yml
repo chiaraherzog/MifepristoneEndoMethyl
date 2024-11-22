@@ -1,0 +1,25 @@
+project:
+  type: website
+
+website:
+  title: "Mifepristone Endometrial Tissue Data"
+  back-to-top-navigation: true
+  search: false
+  sidebar:
+    style: "floating"
+    contents:
+      - href: index.qmd
+        text: Home
+      - p1-qc.qmd
+      - p2-dnam-index.qmd
+      - p3-expression-index.qmd
+      - p4-indices.qmd
+
+format:
+  html:
+    theme: cosmo
+    css: styles.css
+    toc: true
+
+
+

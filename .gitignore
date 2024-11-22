@@ -1,0 +1,9 @@
+/.quarto/
+.Rproj.user
+/_site/*
+/archive/*
+/figures-ai/*
+/figures-pdf/*
+/GDCdata/*
+/out/*
+.DS_Store

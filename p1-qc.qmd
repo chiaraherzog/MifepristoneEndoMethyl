@@ -1,0 +1,723 @@
+---
+title: "1. DNAme QC and overview"
+format:
+  html:
+    toc: true
+    code-fold: true
+    code-overflow: wrap
+    code-tools: true
+---
+
+```{r}
+knitr::opts_chunk$set(eval = T, message = F, warning = F)
+
+suppressMessages(suppressWarnings({
+  library(ggplot2)
+  library(dplyr)
+  library(patchwork)
+  library(ggtext)
+}))
+
+```
+
+## 1. QC, computation of indices and PCA
+
+```{r}
+# set file path
+db_path <- file.path("~/Dropbox/")
+```
+
+### Generating pheno file first:
+
+```{r generate.pheno, eval = F}
+samplesheet <- read.csv(file.path(db_path, "data", "raw-data", "mifepristone", "endometrium", "original_samplesheet", "20220209_endometrial_KI-apoptosis_BH3mims.csv"), 
+                        skip = 7,
+                        sep = ';') |> 
+  dplyr::mutate(Sentrix_ID = gsub('"', '', Sentrix_ID),
+                basename = paste0(Sentrix_ID, "_", Sentrix_Position),
+                id = gsub("after_|before_|_extra", "", Sample_Name)) |> 
+  dplyr::filter(grepl("BRCAmut", id)) |> 
+  dplyr::select(id, basename, Sentrix_ID, Sentrix_Position, Sample_Well) |> 
+  dplyr::mutate(time = ifelse(grepl("A$", id), "pre", "post"))
+
+# # Extract pheno from master datasheet
+# load(file.path(db_path, "eca/0-master-dataset/mdat.Rdata"))
+# 
+# mdat <- mdat |> 
+#   dplyr::filter(experiment_name == 'Mifepristone' & dataset_name == 'Endometrium' & free_var2 == 'BRCAmut')
+
+treatment <- readxl::read_xlsx("~/Dropbox/data/mifepristone/endometrium/pheno/DNA endometrium_220311_annotated.xlsx",
+                                 sheet = 2) |> 
+  dplyr::filter(Group != "MiMi") |> 
+  dplyr::mutate(id = paste0("BRCAmut_", ID)) |> 
+  dplyr::mutate(trt = dplyr::case_when(Treatment == "Mifepristone" ~ "Mifepristone",
+                           Treatment != "Mifepristone" ~ "Vitamin B")) |> 
+  dplyr::select(id, trt)
+
+age <- readxl::read_xlsx(file.path(db_path, "data/mifepristone/endometrium/pheno/DNA endometrium_220311_annotated.xlsx"),
+                           sheet = 3) |> 
+    dplyr::mutate(id = paste0("BRCAmut_", BR)) |> 
+  dplyr::rename(age = Age,
+                bmi = BMI,
+                us = `endo ultrasound (mm)`,
+                mens_phase = `mestrual phase`,
+                disease = disease,
+                med = `concomittant med`) |> 
+  dplyr::select(id, age, bmi, us, mens_phase, disease, med) |>
+  dplyr::mutate(mens_phase = dplyr::case_when(mens_phase == '?' ~ 'unknown',
+                                       mens_phase %in% c("no menstruation", "not regular menstruation, 5 weeks since last") ~ "irregular or no menstruation",
+                                       mens_phase == 'midcycle' ~ "mid luteal",
+                                       TRUE ~ mens_phase))
+
+pheno <- samplesheet |> 
+  dplyr::left_join(treatment, by = 'id') |> 
+  dplyr::left_join(age, by = 'id') |> 
+  dplyr::relocate(basename)
+
+save(pheno, file = "out/pheno.Rdata")
+```
+
+### Run QC
+
+```{r, eval = F}
+library(eutopsQC)
+path_to_files <- file.path(db_path, "data/raw-data/mifepristone/endometrium/IDATS")
+
+preprocessData(input = path_to_files,
+               output = file.path(db_path, 'data/mifepristone/endometrium/brca/'),
+               report = file.path(db_path, 'eca/mifepristone/endometrium/3-manuscript-analysis/MifepristoneEndoMethyl/out/report/'),
+               pheno = file.path(db_path, 'eca/mifepristone/endometrium/3-manuscript-analysis/MifepristoneEndoMethyl/out/pheno.Rdata'),
+               find.files = T,
+               beta.subset.compatible = F,
+               overwrite = T,
+               save.rs = T,
+               run.name = 'MifeEndometrium',
+               cores = 4)
+```
+
+### Compute indices
+
+```{r compute.indices, eval = F}
+load(file.path(db_path, 'data/mifepristone/endometrium/brca/beta_merged.Rdata'))
+load("out/pheno.Rdata")
+# identical(colnames(beta_merged), pheno$basename)
+
+library(eutopssrc)
+# Add ic and compute indices
+pheno <- eutopssrc::EpiDISH_EpiFibIC(beta_merged, pheno = pheno)
+pheno$TCGA_EC <- eutopssrc::TCGA_EC(beta_merged) 
+pheno$WID_EC <- eutopssrc::WID_EC(beta_merged)$WID_EC_discovery
+pheno <- cbind(pheno, as.data.frame(eutopssrc::PROSENPCGT_age(beta_merged)))
+pheno <- eutopssrc::hEpiDISH(beta_merged, pheno)
+library(WIDclocks)
+pheno <- cbind(pheno, as.data.frame(WIDclocks::WID_clocks(beta_merged)))
+```
+
+### Save analysis data
+
+```{r save.files, eval = F}
+data <- pheno |> 
+  dplyr::mutate(participant_id = gsub("A$|B$", "", id)) |> 
+  dplyr::mutate(time = factor(time, levels = c('pre', 'post')),
+                trt = factor(trt, levels = c("Vitamin B", "Mifepristone")),
+                mens_phase = factor(mens_phase, levels = c('unknown',
+                                                           'irregular or no menstruation',
+                                                           'early luteal',
+                                                           'mid luteal',
+                                                           'late luteal',
+                                                           'ongoing menstruation')))
+save(data, file = 'out/data_tmp.Rdata')
+```
+
+
+
+## 2. Data overview
+
+```{r loaddat}
+load('out/data_tmp.Rdata')
+load(file.path(db_path, 'data/mifepristone/endometrium/brca/beta_merged.Rdata'))
+```
+
+Methylation data are available for `r nrow(data)` samples derived from `r length(unique(data$participant_id))` individuals, samples before and after mifepristone treatment. 
+
+### Cleaning duplicates and SNPs
+
+One sample is provided in duplicates. Let's check array intensities and replicates for this sample.
+
+```{r arrayintensities.dupe, fig.width = 12, fig.height = 3.9}
+load("out/report/Log/MifeEndometrium_qc.Rdata")
+tmp <- qc |> as.data.frame() |> 
+  tibble::rownames_to_column('basename') |> 
+  dplyr::left_join(data, by = 'basename')
+
+assayIntensity <- tmp |> 
+  ggplot(aes(x = mMed, uMed,
+             colour = id)) +
+  geom_point(size = 2, alpha = 0.8) +
+  theme_bw() +
+  coord_cartesian(ylim = c(5, 15),
+                  xlim = c(5, 15)) +
+  theme(legend.position = 'none',
+        axis.title = element_markdown()) +
+  scale_color_viridis_d() +
+  labs(x = 'median intensity<br><b>methylated</b>',
+       y = 'median intensity<br><b>unmethylated</b>')
+
+
+dupe <- tmp |> 
+  janitor::get_dupes(id) |> 
+  dplyr::mutate(int_rep = ifelse(mMed == max(mMed), 'high_int', 'lower_int'))
+
+b <- dupe |> 
+  ggplot(aes(x = mMed,
+             y = uMed,
+             colour = int_rep)) +
+  geom_point() +
+  theme_bw() +
+  coord_cartesian(ylim = c(5, 15),
+                  xlim = c(5, 15))
+
+# Correlation of samples
+dupe_b <- beta_merged[,match(dupe$basename, colnames(beta_merged))]
+
+c <- dupe_b |> as.data.frame() |> 
+  ggplot(aes(x = `206119360030_R01C01`,
+             y = `206119360071_R08C01`)) +
+  stat_bin2d(bins = 250,
+             aes(fill = log(after_stat(density)))) +
+  theme_minimal() +
+  theme(aspect.ratio = 1,
+        legend.position = "top",
+        axis.title.x = element_markdown(),
+        axis.title.y = element_markdown()) +
+  ggpubr::stat_cor() +
+  labs(x = "<b>lower intensity rep</b><br>β value",
+       y = "<b>higher intensity rep</b><br>β value") 
+
+
+assayIntensity|b|c
+```
+
+Let's remve the lower intensity sample.
+
+```{r remove.lowerint}
+lowerint <- dupe |> dplyr::filter(int_rep == 'lower_int') |> pull(basename)
+
+data <- data |> 
+  dplyr::filter(basename != lowerint)
+```
+
+Next, let's check SNPs:
+
+```{r snps, fig.width = 9, fig.height = 9}
+load("out/report/Log/MifeEndometrium_rs.Rdata")
+
+rs <- rs |> t() |> 
+  as.data.frame() |> 
+  # tidyr::pivot_longer(everything(),
+  #                     names_to = 'rs',
+  #                     values_to = 'value') |> 
+  tibble::rownames_to_column('basename')
+
+tmp <- data |> 
+  dplyr::left_join(rs) |> 
+  tidyr::pivot_longer(starts_with("rs"),
+                      names_to = 'rs',
+                      values_to = 'value') |> 
+  tidyr::pivot_wider(id_cols = c(participant_id, rs),
+                     names_from = 'time',
+                     values_from = value)
+
+snps <- tmp |> 
+  dplyr::mutate(num = as.numeric(gsub("BRCAmut_", "", participant_id)),
+                participant_id = ifelse(num == 11, 
+                                        paste0("<b>", gsub("BRCAmut_", "participant ", participant_id), "</b><br><b style='color:red'>mis</b>match"),
+                                        paste0("<b>", gsub("BRCAmut_", "participant ", participant_id), "</b><br>match")),
+                participant_id = forcats::fct_reorder(participant_id, num)) |> 
+  ggplot(aes(x = pre,
+             y = post)) +
+  geom_abline(slope = 1, intercept = 0,
+              colour = 'grey80') +
+  geom_point(size = 0.9,
+             alpha = 0.9,
+             aes(colour = rs)) +
+  facet_wrap(~participant_id) +
+  theme_bw() +
+  scale_colour_viridis_d('B') +
+  theme(strip.text = element_markdown()) +
+  scale_x_continuous(breaks = c(0, 0.5, 1)) +
+  scale_y_continuous(breaks = c(0, 0.5, 1)) +
+  theme(legend.position = 'none') +
+  labs(x = 'rs methylation values (pre)',
+       y = 'rs methylation values (post)')
+```
+
+SNP mismatches in one individual, BRCAmut_11. They are a Vitamin-treated individual. Both pre and post samples from this person are excluded from further analysis:
+
+```{r save.without.snpmismatch}
+data <- data |>
+  dplyr::filter(participant_id != 'BRCAmut_11')
+save(data, file = 'out/data.Rdata')
+```
+
+### Participant characteristics
+
+```{r table}
+library(gt)
+library(gtsummary)
+
+theme_gtsummary_compact()
+
+a <- data |> 
+  dplyr::filter(trt == 'Mifepristone') |> 
+  dplyr::select(age, bmi, time, mens_phase, us) |> 
+  gtsummary::tbl_summary(by = time,
+                         type = list(age = 'continuous',
+                                     us = 'continuous'),
+                         label = list(mens_phase = 'Menstrual phase',
+                                      age = 'Age at consent',
+                                      bmi = 'BMI',
+                                      us = 'Ultrasound thickness (mm)'))
+
+b <- data |> 
+  dplyr::filter(trt != 'Mifepristone') |> 
+  dplyr::select(age, bmi, time, mens_phase, us) |> 
+  gtsummary::tbl_summary(by = time,
+                         type = list(age = 'continuous',
+                                     us = 'continuous'),
+                         label = list(mens_phase = 'Menstrual phase',
+                                      age = 'Age at consent',
+                                      bmi = 'BMI',
+                                      us = 'Ultrasound thickness (mm)'))
+
+tbl_merge(list(b, a), tab_spanner = c("Vitamin B", "Mifepristone"))
+```
+
+It is worth noting that all women post mifepristone exhibit irregular or no menstruation (in line with its potential as a contraceptive?). Endometrial thickness seems slightly elevated.
+
+Endometrial thickness by phase:
+
+```{r end.thickness, fig.width = 3.5, fig.height = 4}
+usthickness <- data |> 
+  ggplot(aes(x = mens_phase,
+             y = as.numeric(us))) +
+  geom_boxplot(aes(fill = mens_phase),
+               alpha = 0.1) +
+  geom_point(aes(colour = mens_phase),
+             size = 2.5,
+             alpha = 0.7) +
+  theme_bw() +
+  theme(legend.position = 'none',
+        axis.text.x = element_text(angle = 90, hjust = 1,
+                                   vjust = 0.5),
+        axis.ticks.x = element_blank()) +
+  scale_color_viridis_d(aesthetics = c('colour', 'fill')) +
+  labs(y = 'endometrial thickness on ultrasound\n(mm)', x = '',
+       subtitle = '') 
+```
+
+### PCA of methylation data
+
+#### Compute PCA
+
+Compute PCA using the top 30,000 variable sites.
+
+```{r compute.pca}
+beta <- beta_merged[,data$basename]
+
+# sd
+top_sites = 30000
+sd <- matrixStats::rowSds(beta)
+names(sd) <- rownames(beta)
+sd <- sd[order(sd, decreasing = T)]
+sd_top <- sd[1:top_sites]
+beta_top <- beta[names(sd_top),]
+  
+# pc
+pc <- prcomp(t(beta_top), scale. = T, center = T)
+
+# identical(data$basename, rownames(pc$x))
+
+data <- cbind(data, pc$x[,1:10])
+```
+
+#### a) Associations with biological and technical features
+
+```{r pca.assoc}
+pcHeatmap <- function(data, features){
+  
+  pc_dat <- data |> 
+    dplyr::select(any_of(features))
+  
+  pcs <- data |> 
+    dplyr::select(PC1:PC10)
+  
+  tmp <- pc_dat |> 
+    dplyr::select(any_of(features), 'ic', 'hepidish_Neutro') |> 
+    dplyr::mutate_if(is.character, as.factor)
+
+  mat <- matrix(ncol = ncol(pcs),
+                nrow = ncol(tmp))
+  colnames(mat) <- colnames(pcs)
+  rownames(mat) <- colnames(tmp)
+  
+  for (i in colnames(mat)){
+    for (j in rownames(mat)){
+      
+      if(is.numeric(tmp[,j])){
+      mat[j,i] <- cor.test(pcs[,i], tmp[,j])$p.value
+      # pmat[j,i] <- cor.test(pcs[,i], tmp[,j])
+      } else {
+        mat[j,i] <- kruskal.test(pcs[,i], tmp[,j])$p.value
+      }
+
+    }
+  }
+  
+  return(mat)
+}
+
+plotHeatmap <- function(map, labs){
+  
+  library(ComplexHeatmap)
+  map <- apply(map, 2, function(t) ifelse(t < 0.05, t, NA))
+
+  p <- Heatmap(-log10(map),
+        row_labels = labs,
+             cluster_columns = F,
+             cluster_column_slices = F,
+             row_names_side = 'left',
+             cluster_rows = F,
+             column_title = NULL,
+             show_row_dend = F,
+             show_column_dend = F,
+             name = '-log10(p value)',
+             na_col = 'white',
+             col = circlize::colorRamp2(breaks = seq(36, 1.3, length.out = 5),
+                                        colors = rev(viridis::viridis(5)),
+                                        # colors = rev(color("batlow")(5)),
+                                        # colors = rev(cols[c(2,5,4, 6, 7)])
+             ),
+             row_names_gp = grid::gpar(fontsize = 9),
+             column_names_gp = grid::gpar(fontsize = 9),
+             border_gp = gpar(lwd = 0.5),
+             border = T)
+  
+  return(p)
+}
+
+# Generate pc Heatmap
+features = c("participant_id",
+             "Sentrix_ID",
+             "Sentrix_Position",
+             "Sample_Well",
+             "time", "trt",
+             "age", "bmi", "us",
+             "ic", 
+             "mens_phase", "disease", "med",
+             'hepidish_Neutro')
+
+pcmat <- pcHeatmap(data, features)
+
+# Plot PC Heatmap
+labs = c('participant id', 'sentrix id', 'sentrix position', 'well',
+           'timepoint', 'treatment',
+           'age at consent', 'bmi at consent', 'ultrasound thickness', 'immune cell proportion', 'menstrual phase',
+           'concomintant disease', 'concomitant medication', 'neutrophil proportion')
+
+hm <- plotHeatmap(pcmat, labs = labs)
+print(hm)
+
+# alternative approach with geom_tile
+
+
+pcmat2 <- pcmat
+rownames(pcmat2) <- labs
+x <- hclust(dist(pcmat2))
+plot(x)
+pcmat2 <- pcmat2[x$order,]
+
+pcmat3 <- pcmat2 |> as.data.frame() |> 
+  tibble::rownames_to_column('feature') |> 
+  tidyr::pivot_longer(-c('feature'),
+                      names_to = 'PC',
+                      values_to = 'value')
+
+pcTile <- pcmat3 |> 
+  dplyr::mutate(value = ifelse(value < 0.05, value, NA),
+                PC = forcats::fct_reorder(PC, as.numeric(gsub("PC", "", PC))),
+                feature = factor(feature, levels = rownames(pcmat2))) |> 
+  ggplot(aes(x = PC,
+             y = feature,
+             fill = -log10(value))) +
+  geom_tile() +
+  scale_fill_viridis_c(na.value = 'white') +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90,
+                                   hjust = 1,
+                                   vjust = 0.5),
+        axis.ticks.x = element_blank(),
+        axis.ticks.y = element_blank()) +
+  labs(x = '', y = '')
+
+```
+
+* Main principal components are not associated with technical factors (position or well).
+* As samples from same individual were processed on the same beadchip, there is an association with sentrix id.
+* As expected, there is an association with IC.
+* Also associations with menstrual phase and others.
+
+#### b) PCA plots
+
+```{r pcplots, fig.width = 8, fig.height = 8.5}
+pals <- khroma::color('batlow')(8)
+
+ic <- data |> 
+  ggplot(aes(x = PC1,
+             y = PC2,
+             colour = ic)) +
+  geom_point(size = 2.5,
+             alpha = 0.85) +
+  khroma::scale_color_batlow(range = c(0, 0.8)) +
+  theme_bw()
+
+time <- data |> 
+  ggplot(aes(x = PC1,
+             y = PC2,
+             colour = trt)) +
+  geom_point(size = 3,
+             alpha = 0.85,
+             aes(shape = time)
+             ) +
+  scale_shape_manual(values = c(1, 16),
+                     name = 'Timepoint') +
+  scale_colour_manual(values = c(pals[6], pals[1]),
+                      name = 'Treatment') +
+  theme_bw()
+
+
+cols <- c("unknown" = 'grey70',
+          'irregular or no menstruation' = '#A28A2D',
+          'early luteal' = '#001959',
+          'mid luteal' = '#2C635B',
+          'late luteal' = '#FDB1AB',
+          'ongoing menstruation' = 'red'
+          )
+
+p <- data |> 
+  ggplot(aes(x = PC1,
+             y = PC2,
+             colour = mens_phase)) +
+  geom_point(size = 3,
+             alpha = 0.7,
+             aes(label = id)) +
+  # stat_ellipse(aes(fill = mens_phase)) +
+  scale_colour_manual(values = cols,
+                      name = 'Menstrual phase\nat sampling') +
+  # khroma::scale_color_batlow(range = c(0, 0.8),
+  #                            discrete = T) +
+  theme_bw()
+(ic/time/p)
+```
+
+
+
+### Other qc
+
+#### age correlation
+
+```{r fig.width = 6, fig.height = 4.9}
+data |> 
+  ggplot(aes(x = age,
+             y = WID_general_clock,
+             colour = trt)) +
+  geom_abline(intercept = 0, slope = 1,
+              alpha = 0.5) +
+  geom_point() +
+  theme_bw() +
+  coord_cartesian(xlim = c(25, 55),
+                  ylim = c(25, 55)) +
+  facet_grid(trt~time) +
+  ggpubr::stat_cor()
+```
+
+#### Beta densities
+
+```{r beta.dens, fig.with = 6, fig.height=3}
+df = data.frame(matrix(nrow = 1,
+                       ncol = 3))
+colnames(df) <- c("basename", "x", "y")
+
+for (s in 1:ncol(beta)){
+  dens <- density(beta[,s], bw = 0.02)
+  tmp <- data.frame(x = dens$x,
+                    y = dens$y,
+                    basename = colnames(beta)[s])
+  df <- rbind(df, tmp)
+}
+
+tmp <- df |> 
+  dplyr::inner_join(data, by = 'basename')
+
+betaDist <- tmp |> 
+  dplyr::filter(!is.na(x)) |> 
+  ggplot(aes(x = x,
+             y = y)) +
+  geom_line(linewidth = 0.7, alpha = 0.8,
+            aes(group = basename,
+                colour = ic)) +
+  khroma::scale_color_batlow(range = c(0, 0.8)) +
+  # scale_colour_manual(values = colorRampPalette(cols[c(1, 2, 6)])(404)) +
+  theme_minimal() +
+  theme() +
+  labs(x = 'beta', y = 'Density')
+
+```
+
+## Cell composition
+
+```{r}
+# Colours
+pals <- khroma::color('batlow')(8)
+# Set treatment colours
+cols_trt <- pals[c(1, 6)]
+
+# prepare for plotting
+tmp <- eutopssrc::expand_celltypes(data) |> 
+  dplyr::filter(celltype != 'CD8 T cells') # remove CD8 T cells (not present)
+
+# compute delta
+tmp2 <- tmp |> 
+  tidyr::pivot_wider(id_cols = c('participant_id', 'trt', 'celltype'),
+                     names_from = 'time',
+                     values_from = 'cell_prop') |> 
+  dplyr::rowwise() |> 
+  dplyr::mutate(d = post-pre) |> 
+  dplyr::ungroup()
+
+celltypesPrePost <- tmp |> 
+  ggplot(aes(x = time,
+             y = cell_prop)) +
+  geom_boxplot(aes(fill = trt),
+               outlier.shape = NA,
+               alpha = 0.6) +
+  geom_line(aes(group = participant_id,
+                colour = trt),
+            alpha = 0.3) +
+  facet_grid(celltype~trt,
+             scales = 'free_y') +
+  ggpubr::stat_compare_means(
+    comparisons = list(c('pre', 'post')),
+                             # ref.group = 'pre',
+                             paired = T,
+                             label = 'p.format',
+                             label.y.npc = 0.93,
+    size = 2.8) +
+  labs(x = '',
+       y = 'Proportion') +
+  theme_bw() +
+  theme(legend.position = 'none') +
+  scale_y_continuous(expand = c(0.09, 0.09)) +
+  coord_cartesian(expand = T,
+                  clip = 'off') +
+  scale_fill_manual(values = cols_trt,
+                    aesthetics = c('colour', 'fill'))
+
+
+celltypesDelta<- tmp2 |> 
+  ggplot(aes(x = trt,
+             y = d)) +
+  geom_hline(yintercept = 0,
+             linetype = 'dashed',
+             alpha = 0.3) +
+  geom_boxplot(aes(fill = trt),
+               outlier.shape = NA,
+               alpha = 0.6) +
+  ggbeeswarm::geom_quasirandom(aes(colour = trt)) +
+  facet_grid(celltype~'∆ time',
+             scales = 'free_y') +
+  ggpubr::stat_compare_means(comparisons = list(c('Vitamin B', "Mifepristone")),
+                             paired = F,
+                             label = 'p.format',
+                             size = 2.8) +
+  scale_y_continuous(expand = c(0.09, 0.09)) +
+  labs(x = '',
+       y = '∆ post-pre') +
+  theme_bw() +
+  theme(legend.position = 'right',
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank()) +
+  scale_fill_manual(values = cols_trt,
+                    aesthetics = c('fill', 'colour'),
+                    name = 'Treatment')
+
+(celltypesPrePost|celltypesDelta) + plot_layout(widths = c(1.5, 1)) +
+  plot_annotation(tag_levels = c('a'))
+```
+
+
+Individuals on mifepristone exhibit an **increase** in estimated fibroblast proportion. This is likely linked to the cessation/more irregular menstrual cycle in these women after treatment. 
+
+I could not find information relating fibroblast proportion and menstrual cycle but thi sis likely physiologically relevant.
+
+## Figures
+
+::: {.panel-tabset}
+
+### Figure 1
+
+```{r fig.1, fig.width = 10.5, fig.height=9}
+design <- '
+AAAA
+BBCC
+DDEE'
+
+fig <- (plot_spacer() + pcTile + ic + time + p) + plot_annotation(tag_levels = 'a') +
+  plot_layout(design = design)
+
+ggsave(fig, filename = 'figures-pdf/fig1.png',
+       width = 10.5,
+       height = 9,
+       units = 'in')
+```
+
+### Supplementary Figure 2
+
+```{r usthickness, fig.width = 2.5, fig.height = 41}
+usthickness
+ggsave(usthickness, filename = 'figures-pdf/suppl_fig2.png',
+       width = 2.5,
+       height = 4.1,
+       units = 'in')
+```
+
+### Supplementary Figure 3
+
+```{r, fig.width = 12, fig.height = 9}
+design <- '
+AAAADDE
+AAAADDE
+AAAADDE
+BBBBDDE
+CCCCDDE'
+
+suppl_fig2 <- (snps + assayIntensity + betaDist + celltypesPrePost + celltypesDelta) +
+  plot_annotation(tag_levels = 'a') +
+  plot_layout(design = design)
+
+print(suppl_fig2)
+
+ggsave(suppl_fig2, filename = 'figures-pdf/suppl_fig3.png',
+       width = 12,
+       height = 9,
+       units = 'in')
+```
+
+:::
+
+## Summary
+
+* Mifepristone induces irregular menstrual periods
+* This is also observed with a strong impact on methylation data and obvious in PCs 1/2.
+* One sample has SNP mismatches (excluded);
+* One sample has a much higher IC than the others, include for now but this may need to be considered for downstream analysis.

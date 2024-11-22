@@ -1,0 +1,491 @@
+---
+title: "2. Development and evaluation of a DNA methylation-based EC tissue index"
+format:
+  html:
+    toc: true
+    code-fold: true
+    code-overflow: wrap
+    code-tools: true
+---
+
+```{r setup}
+knitr::opts_chunk$set(message = F,warning = F, eval = F)
+
+# Colours
+pals <- khroma::color('batlow')(8)
+cols_trt <- pals[c(1, 6)]
+
+suppressMessages(suppressWarnings({
+  library(dplyr)
+  library(ggplot2)
+  library(patchwork)
+  library(ggrepel)
+  library(pheatmap)
+  library(plotly)
+  library(TCGAbiolinks)
+  library(SummarizedExperiment)
+  library(org.Hs.eg.db)
+  library(eutopssrc)
+}))
+
+```
+
+# 1. Load and prep DNAm data from TCGA
+
+
+```{r loaddata, eval = F}
+#------------------------------------
+# Download TCGA EC data
+# Primary tumor + solid normal tissue
+# Downloading using TCGA biolinks
+# Keeping data downloaded locally as big files (68GB)
+#------------------------------------
+
+library(TCGAbiolinks)
+
+query <- GDCquery(project = "TCGA-UCEC",
+                  data.category = "DNA Methylation",
+                  platform = "Illumina Human Methylation 450",
+                  data.type = "Methylation Beta Value",
+                  sample.type = c("Primary Tumor",
+                                  "Solid Tissue Normal"))
+
+query_pheno <- GDCquery_clinic(project = "TCGA-UCEC",
+                               type = "clinical")
+
+dat <- query$results[[1]]
+ind <- match(dat$cases.submitter_id, query_pheno$submitter_id)
+tcga_pheno <- query_pheno[ind,]
+
+dir.create("out/tcgadat/")
+dir.create("out/tcgadat/TCGA_EC/")
+setwd("out/tcgadat/TCGA_EC/")
+GDCdownload(query, method = "api", files.per.chunk = 10) # RIP internet
+data <- GDCprepare(query)
+
+library(SummarizedExperiment)
+beta <- assays(data)[[1]]
+# beta <- na.omit(beta)
+setwd("../../../")
+save(beta, file = "out/tcgadat/beta.Rdata")
+
+pheno <- colData(data)
+pheno <- as.data.frame(pheno)
+pheno$type <- case_when(pheno$sample_type=="Solid Tissue Normal" ~ "Control",
+                        pheno$sample_type=="Primary Tumor" ~ "EC")
+pheno$age <- pheno$age_at_index
+save(pheno, file = "out/tcgadat/pheno.Rdata")
+
+# Split into training and testing set
+pheno$tr_val <- "training"
+set.seed(139858320)
+ind <- sample(1:484, 0.3*nrow(pheno), replace = FALSE)
+pheno[ind,]$tr_val <- "validation"
+
+table(pheno$tr_val, pheno$definition) # split looks ok
+
+ind <- match(rownames(pheno), colnames(beta))
+beta <- beta[,ind]
+
+ind <- pheno$tr_val=="training"
+beta_tr <- beta[,ind]
+ind <- pheno$tr_val == "validation"
+beta_val <- beta[,ind]
+saveRDS(beta_tr, file = "out/tcgadat/beta_tr.Rds")
+saveRDS(beta_val, file = "out/tcgadat/beta_val.Rds")
+
+
+# Estimating IC
+library(EpiDISH)
+identical(colnames(beta), rownames(pheno))
+out.l <- epidish(beta.m = beta, ref.m = centEpiFibIC.m, method = "RPC") 
+save(out.l, file='out/tcgadat/epidish_output.Rdata')
+
+frac.m <- hepidish(beta.m = beta, ref1.m = centEpiFibIC.m, ref2.m = centBloodSub.m, 
+                   h.CT.idx = 3, method = 'RPC', maxit = 500)
+save(frac.m, file='out/tcgadat/hepidish_output.Rdata')
+
+pheno$ic <- out.l$estF[,3]
+# hist(pheno$ic)
+
+
+pheno |> 
+  ggplot(aes(x = tr_val,
+             y = age_at_index)) +
+  geom_boxplot() # age split ok
+
+# Minimal pheno
+library(tidyverse)
+
+pheno_tr <- pheno %>%
+  rownames_to_column("basename") %>%
+  filter(tr_val=="training") %>%
+  dplyr::select(basename, type, age, ic) %>%
+  column_to_rownames("basename")
+
+pheno_val <- pheno %>%
+  rownames_to_column("basename") %>%
+  filter(tr_val=="validation") %>%
+  dplyr::select(basename, type, age, ic) %>%
+  column_to_rownames("basename")
+
+saveRDS(pheno_tr, file = "out/tcgadat/pheno_tr.Rds")
+saveRDS(pheno_val, file = "out/tcgadat/pheno_val.Rds")
+
+```
+
+
+* Delta-beta estimation: The following code is run in terminal (ensure you are in project folder)
+
+```{r, eval = F, echo = T}
+#!/bin/bash
+
+Rscript src/delta-beta-estimate.R \
+	--path_to_beta out/tcgadat/beta_tr.Rds \
+	--path_to_pheno out/tcgadat/pheno_tr.Rds \
+	--path_to_output out/tcgadat/db
+```
+
+* Subsetting beta file: the following code is run in terminal (ensure you are in project folder)
+
+```{r, eval = F, echo = T}
+#!/bin/bash
+
+Rscript src/save-beta-subset.R \
+	--path_to_tr_beta out/tcgadat/beta_tr.Rds \
+	--path_to_val_beta out/tcgadat/beta_val.Rds \
+	--path_to_delta_beta out/tcgadat/db/delta-beta.Rds \
+	--path_to_output out/tcgadat/trbetas
+```
+
+* Index training:
+
+```{r, eval = F}
+
+# Index training
+
+library(glmnet)
+library(pROC)
+library(rms)
+
+source('src/el-classifier.R')
+source('src/train-linear-classifier.R')
+source('src/merge-epi-imm.R')
+
+
+# Load data
+beta_tr_epi <- readRDS(file = 'out/tcgadat/trbetas/beta_tr_epi.Rds')
+beta_val_epi <- readRDS(file = 'out/tcgadat/trbetas/beta_val_epi.Rds')
+beta_tr_imm <- readRDS(file = 'out/tcgadat/trbetas/beta_tr_imm.Rds')
+beta_val_imm <- readRDS(file = 'out/tcgadat/trbetas/beta_val_imm.Rds')
+pheno_tr <- readRDS(file = 'out/tcgadat/pheno_tr.Rds')
+pheno_val <- readRDS(file = 'out/tcgadat/pheno_tr.Rds')
+
+identical(colnames(beta_tr_epi), rownames(pheno_tr))
+identical(colnames(beta_val_epi), rownames(pheno_val))
+
+type_tr <- as.factor(pheno_tr$type)
+ic_tr <- as.numeric(pheno_tr$ic)
+
+type_val <- as.factor(pheno_val$type)
+ic_val <- as.numeric(pheno_val$ic)
+
+n.seq <-c(100,500,seq(1000,30000,by=1000))
+
+# Train and validate classifiers
+
+#---------------------------------------
+# Epithelial
+#---------------------------------------
+# ------- Ridge -------- #
+res_ridge_epi <- train_linear_classifier(beta_tr = beta_tr_epi,
+                                         type_tr = type_tr,
+                                         beta_val = beta_val_epi,
+                                         type_val = type_val,
+                                         alpha = 0.0,
+                                         n_seq = n.seq)
+
+saveRDS(res_ridge_epi, file='out/tcgadat/res_ridge_epi.Rds')
+
+# ------- Lasso -------- #
+res_lasso_epi <- train_linear_classifier(beta_tr = beta_tr_epi,
+                                         type_tr = type_tr,
+                                         beta_val = beta_val_epi,
+                                         type_val = type_val,
+                                         alpha = 1.0,
+                                         n_seq = n.seq)
+
+saveRDS(res_lasso_epi, file='out/tcgadat/res_lasso_epi.Rds')
+
+#---------------------------------------
+# Immune
+#---------------------------------------
+
+# ------- Ridge -------- #
+res_ridge_imm <- train_linear_classifier(beta_tr = beta_tr_imm,
+                                         type_tr = type_tr,
+                                         beta_val = beta_val_imm,
+                                         type_val = type_val,
+                                         alpha = 0.0,
+                                         n_seq = n.seq)
+
+saveRDS(res_ridge_imm, file='out/tcgadat/res_ridge_imm.Rds')
+
+# ------- Lasso -------- #
+res_lasso_imm <- train_linear_classifier(beta_tr = beta_tr_imm,
+                                         type_tr = type_tr,
+                                         beta_val = beta_val_imm,
+                                         type_val = type_val,
+                                         alpha = 1.0,
+                                         n_seq = n.seq)
+
+saveRDS(res_lasso_imm, file='out/tcgadat/res_lasso_imm.Rds')
+
+#---------------------------------------
+# Merge epithelial and immune ranked subsets
+#---------------------------------------
+
+beta_tr <- merge_epi_imm(beta_tr_epi, beta_tr_imm)
+beta_val <- merge_epi_imm(beta_val_epi, beta_val_imm)
+
+# ------- Ridge -------- #
+res_ridge_epi_imm <- train_linear_classifier(beta_tr = beta_tr,
+                                             type_tr = type_tr,
+                                             beta_val = beta_val,
+                                             type_val = type_val,
+                                             alpha = 0.0,
+                                             n_seq = n.seq)
+
+saveRDS(res_ridge_epi_imm, file='out/tcgadat/res_ridge_epi_imm.Rds')
+
+# ------- Lasso -------- #
+res_lasso_epi_imm <- train_linear_classifier(beta_tr = beta_tr,
+                                             type_tr = type_tr,
+                                             beta_val = beta_val,
+                                             type_val = type_val,
+                                             alpha = 1.0,
+                                             n_seq = n.seq)
+
+saveRDS(res_lasso_epi_imm, file='out/tcgadat/res_lasso_epi_imm.Rds')
+```
+
+* Index plots: Comparing lasso and ridge approaches on epithelial, immune, or combined delta-betas
+
+```{r eval =F}
+colour.pal.d8 <- c("#EA7580","#F2949A","#F6B3A1","#D8C99E","#3AB9AC","#109DB7","#0C6EA5","#172869")
+colour.pal.c <- colorRampPalette(colour.pal.d8)
+
+source("src/plot_performance_comparisons.R")
+source("src/consensus_roc.R")
+
+res_ridge_epi <- readRDS("out/tcgadat/res_ridge_epi.Rds")
+res_lasso_epi <- readRDS("out/tcgadat/res_lasso_epi.Rds")
+res_ridge_imm <- readRDS("out/tcgadat/res_ridge_imm.Rds")
+res_lasso_imm <- readRDS("out/tcgadat/res_lasso_imm.Rds")
+res_ridge <- readRDS("out/tcgadat/res_ridge_epi_imm.Rds")
+res_lasso <- readRDS("out/tcgadat/res_lasso_epi_imm.Rds")
+
+ridge_epi <- combine_sets(res_ridge_epi, "Ridge - Epithelial", type = "slope")
+lasso_epi <- combine_sets(res_lasso_epi, "Lasso - Epithelial", type = "slope")
+ridge_imm <- combine_sets(res_ridge_imm, "Ridge - Immune", type = "slope")
+lasso_imm <- combine_sets(res_lasso_imm, "Lasso - Immune", type = "slope")
+ridge <- combine_sets(res_ridge, "Ridge - Combined", type = "slope")
+lasso <- combine_sets(res_lasso, "Lasso - Combined", type = "slope")
+
+pdat <- rbind(ridge_epi, lasso_epi, ridge_imm, lasso_imm, ridge, lasso)
+pdat <- as.data.frame(pdat)
+
+pdat$n <- as.numeric(pdat$n)
+pdat$AUC_val <- as.numeric(pdat$AUC_val)
+pdat$AUC_oob <- as.numeric(pdat$AUC_oob)
+pdat$AUC_tr <- as.numeric(pdat$AUC_tr)
+pdat$Slope <- as.numeric(pdat$Slope)
+pdat$Type <- factor(pdat$Type, levels = c("Ridge - Combined", "Lasso - Combined", "Ridge - Epithelial", "Lasso - Epithelial", "Ridge - Immune", "Lasso - Immune"))
+
+ggplotly(plot_performance_compare(pdat, pdat$AUC_oob))
+```
+
+* Out-of-bag estimate very high and similar for all CpGs; looking at slope to assess "difference" between values (slop closest to 1 desirable)
+
+```{r fig.align = "center", fig.width = 7, fig.height = 4.5}
+p <- pdat |> 
+  ggplot(aes(x = AUC_oob,
+             y = Slope,
+             colour = Type,
+             text = paste("type = ", Type, "\nn = ", n, sep = ""))) +
+  geom_point() +
+  theme_minimal() +
+  theme(legend.position = "top")
+
+ggplotly(p)  
+```
+
+* Selecting ridge combined n = 8000; training final index:
+
+```{r, eval = F}
+# Load data
+beta_tr_epi <- readRDS(file = 'out/tcgadat/beta_tr_epi.Rds')
+beta_val_epi <- readRDS(file = 'out/tcgadat/beta_val_epi.Rds')
+beta_tr_imm <- readRDS(file = 'out/tcgadat/beta_tr_imm.Rds')
+beta_val_imm <- readRDS(file = 'out/tcgadat/beta_val_imm.Rds')
+pheno_tr <- readRDS(file = 'out/tcgadat/pheno_tr.Rds')
+pheno_val <- readRDS(file = 'out/tcgadat/pheno_val.Rds')
+
+identical(colnames(beta_tr_epi), rownames(pheno_tr))
+identical(colnames(beta_val_epi), rownames(pheno_val))
+
+type_tr <- as.factor(pheno_tr$type)
+ic_tr <- as.numeric(pheno_tr$ic)
+
+type_val <- as.factor(pheno_val$type)
+ic_val <- as.numeric(pheno_val$ic)
+
+# Train and validate classifiers
+
+#---------------------------------------
+# 1. Merge epithelial and immune ranked subsets
+#---------------------------------------
+
+beta_tr <- merge_epi_imm(beta_tr_epi, beta_tr_imm)
+beta_val <- merge_epi_imm(beta_val_epi, beta_val_imm)
+
+n <- 8000
+
+beta_tr <- beta_tr[1:n,]
+beta_val <- beta_val[1:n,]
+
+res <- el_classifier(beta_tr = beta_tr,
+                     type_tr = type_tr,
+                     beta_val = beta_val,
+                     type_val = type_val,
+                     alpha = 0.0)
+saveRDS(res, file='out/tcgadat/res.Rdata')
+
+plot(pheno_val$type, res$val_predictor)
+res$val_predictor
+save(res, file = "out/tcgadat/res.Rdata")
+
+#------------------------------------
+# 3. Save coefs
+#------------------------------------
+
+index_coef <- coef(res$fit.cv, s = "lambda.min")
+names <- rownames(index_coef)
+index_coef <- as.numeric(index_coef)
+names(index_coef) <- names
+index_coef <- index_coef[index_coef!=0]
+saveRDS(index_coef, file='out/tcgadat/index_coef.Rds')
+
+
+# Plots
+# library(ggplot2)
+# library(dplyr)
+pheno_val$res <- res$val_predictor
+save(pheno_val, file = "~out/tcgadat/pheno_val.Rdata")
+
+# 
+# pheno_val %>%
+# ggplot(aes(x = type,
+#            y = res)) +
+#   geom_boxplot()
+# 
+# pheno_val %>%
+#   ggplot(aes(x = ic,
+#              y = res,
+#              colour = type)) +
+#   geom_point()
+
+
+
+#------------------------------------
+# 4. Scaling index & saving output
+#------------------------------------
+
+index <- index_coef
+# Compute index
+ind <- na.omit(match(names(index), rownames(beta_val)))
+b <- beta_val[ind,]
+
+ind <- na.omit(match(rownames(b), names(index)))
+w <- index[ind] 
+
+if(!identical(names(w), rownames(b))){
+  stop('***names mismatch***')
+}
+
+scale <- colSums(b*w, na.rm = TRUE)
+saveRDS(scale, file='out/tcgadat/scale.Rds') # This is then incorperated in the code for eutossrc::TCGA_EC.
+```
+
+* Print coefficients to table
+
+```{r}
+# Print coefficients to table
+library(eutopssrc)
+
+x <- as.data.frame(coefTCGAEC) |> 
+  tibble::rownames_to_column('cg') |> 
+  dplyr::filter(cg != '(Intercept)')
+
+write.table(x, file = 'out/TabCoef.csv', sep = ',',row.names = F)
+```
+
+* Figure: 
+
+```{r}
+load('out/tcgadat/beta.Rdata')
+phenoTr<-readRDS("out/tcgadat/pheno_tr.Rds")
+phenoVal<-readRDS("out/tcgadat/pheno_val.Rds")
+phenoTr$set <- 'training'
+phenoVal$set <- 'testing'
+
+data_full <- rbind(phenoTr, phenoVal)
+ind <- match(rownames(data_full), colnames(beta))
+beta <- beta[,ind]
+# identical(colnames(beta), rownames(data_full))
+# sum(names(coefTCGAEC) %in% rownames(beta))
+
+data_full$TCGA_EC <- eutopssrc::TCGA_EC(beta)
+
+# Colours
+pals <- khroma::color('batlow')(8)
+cols_trt <- pals[c(1, 6)]
+
+tcga_ec_boxes <- data_full |> 
+  dplyr::mutate(set = factor(set, levels = c("training", "testing"))) |> 
+  ggplot(aes(x = type,
+             y = TCGA_EC)) +
+  geom_boxplot(aes(fill = type),
+               alpha = 0.2) +
+  ggbeeswarm::geom_quasirandom(aes(colour = type),
+                               size = 0.9) +
+  theme_bw() +
+  theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(),
+        legend.position = 'top') +
+  facet_wrap(~set) +
+  scale_fill_manual(values = pals[c(1, 6)],
+                    labels = c("Normal", "Cancer"),
+                    name = '',
+                    aesthetics = c('colour', 'fill')) +
+  labs(x = '', y='TCGA-EC methylation index')
+save(tcga_ec_boxes, file = 'out/DNAm_index_development.Rdata')
+
+
+# AUC plots:
+source("~/Dropbox/src/plot/plot_roc_slim.R")
+
+tcga_ec_auc_tr <- plot_roc(data_full[data_full$set == 'training',]$type,
+              data_full[data_full$set == 'training',]$TCGA_EC,
+              size = 2.8
+              ) +theme(aspect.ratio = NULL)
+tcga_ec_auc_val <- plot_roc(data_full[data_full$set == 'testing',]$type,
+              data_full[data_full$set == 'testing',]$TCGA_EC,
+              size = 2.8
+              ) +theme(aspect.ratio = NULL)
+save(tcga_ec_auc_tr, tcga_ec_auc_val, file = 'out/DNAmAUCs_plots.Rdata')
+
+aucs <- (tcga_ec_auc_tr|tcga_ec_auc_val)
+ggsave(aucs, file = 'out/plots/DNAmeAucs.pdf',
+       width = 8, height = 3.5, units = 'in',
+       dpi = 600)
+```

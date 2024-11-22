@@ -1,0 +1,399 @@
+---
+title: "3. Development and evaluation of a gene expression-based EC index"
+format:
+  html:
+    toc: true
+    code-fold: true
+    code-overflow: wrap
+    code-tools: true
+---
+
+```{r setup}
+knitr::opts_chunk$set(message = F,warning = F, eval = F)
+
+# Colours
+pals <- khroma::color('batlow')(8)
+cols_trt <- pals[c(1, 6)]
+
+suppressMessages(suppressWarnings({
+  library(dplyr)
+  library(ggplot2)
+  library(patchwork)
+  library(DESeq2)
+  library(ggrepel)
+  library(pheatmap)
+  library(plotly)
+  library(TCGAbiolinks)
+  library(SummarizedExperiment)
+  library(org.Hs.eg.db)
+}))
+
+```
+
+# 1. Derive index on TCGA data
+
+* Data are loaded from TCGA (primary tumor and solid normal tissue) and formatted appropriately.
+  + EntrezIDs are converted to gene symbols and transcripts are collapsed.
+* Resulting dataset is split 80%-20% into training and testing.
+
+```{r loaddata, eval = F}
+# Download TCGA expression data
+p <- 'TCGA-UCEC'
+query.exp <- GDCquery(project = p,
+                      data.category = "Transcriptome Profiling",
+                      data.type = "Gene Expression Quantification",
+                      workflow.type = "STAR - Counts")
+GDCdownload(query.exp, method = "api", files.per.chunk = 10)
+data <- GDCprepare(query.exp)
+save(data, file = "out/expr/tcga_expression.Rdata")
+
+# keep only primary and solid normal tissue
+data <- data[,data$definition!= 'Recurrent Solid Tumor']
+
+# Visualise:
+colData(data) |> as.data.frame() |> dplyr::group_by(patient) |> dplyr::mutate(n = n()) |> 
+  dplyr::ungroup() |> 
+  dplyr::filter(n!=1) |> 
+  ggplot(aes(x = patient, y = n,
+             fill = definition)) +
+  geom_col()
+# some individuals have more than one sample for tumour - unclear how to deal with best, -> exclude;
+exclude <- colData(data) |> as.data.frame() |> dplyr::group_by(patient) |> dplyr::count() |> dplyr::filter(n >= 3) |> dplyr::pull(patient)
+data <- data[,!data$patient %in% exclude]
+
+# tr-test split (80-20):
+ids <- unique(data$patient)
+set.seed(2496)
+ind <- sample(1:length(ids), length(ids)*0.2, replace = F)
+split <- data.frame(patient = ids,
+                    assign = rep("training", length(ids)))
+split$assign[ind] <- 'testing'
+ind <- match(data$patient, split$patient)
+data$assignment <- split[ind,]$assign
+
+# extract pheno and count data
+pheno <- as.data.frame(colData(data))
+cnt <- assays(data)$unstranded
+
+# now we can collapse gene symbols
+genes = mapIds(org.Hs.eg.db,
+               keys=gsub("\\..*", "", rownames(cnt)), 
+               column="SYMBOL",
+               keytype="ENSEMBL",
+               multiVals = 'first')
+genedf <- data.frame(label = genes,
+                     gene = names(genes)) |> 
+  dplyr::distinct() |> dplyr::filter(!is.na(label))
+
+cnt_collapse <- cnt |> as.data.frame() |> 
+  tibble::rownames_to_column('gene') |> 
+  dplyr::mutate(gene = gsub("\\..*", "", gene)) |> 
+  dplyr::inner_join(genedf) |> 
+  dplyr::group_by(label) |> 
+  dplyr::summarise(across(where(is.numeric), sum)) |>
+  dplyr::ungroup() |> 
+  tibble::column_to_rownames('label')
+# identical(colnames(cnt_collapse), rownames(pheno))
+
+# Export tr / testing pheno and expression data
+expTr <- cnt_collapse[,pheno$assignment == 'training']
+phenoTr <- pheno[pheno$assignment=='training',]
+expTe <- cnt_collapse[,pheno$assignment != 'training']
+phenoTe <- pheno[pheno$assignment!='training',]
+save(expTr, phenoTr, expTe, phenoTe, file = 'out/expr/trFiles.Rdata')
+
+
+```
+
+* Differential gene expression analysis is conducted on genes with ≥10 counts in more than 80% of the training set.
+
+```{r deg, eval = F}
+dds <- DESeqDataSetFromMatrix(countData = expTr,
+                              colData = phenoTr,
+                              design= ~ definition)
+keep <- rowSums( counts(dds) >= 10 ) >= ncol(dds)*0.8
+dds <- dds[keep,]
+dds <- DESeq(dds)
+res <- results(dds, name="definition_Solid.Tissue.Normal_vs_Primary.solid.Tumor")
+save(dds, res, file = 'out/expr/deg.Rdata')
+```
+
+* Index training
+
+```{r, eval = F}
+sig <- as.data.frame(res[res$padj<0.01 & !is.na(res$padj),]) |> 
+  tibble::rownames_to_column('gene')
+
+# Get log counts for training and testing data
+dds <- estimateSizeFactors(dds)
+logcountsTr <- log2(counts(dds, normalized=TRUE) + 1 )
+
+# same for testing data
+dds_te <- DESeqDataSetFromMatrix(countData = expTe,
+                              colData = phenoTe,
+                              design= ~ definition)
+dds_te <- estimateSizeFactors(dds_te)
+logcountsTe <- log2(counts(dds_te, normalized=TRUE) + 1 )
+
+source("~/Dropbox/src/DNAm-classifiers/el-classifier.R")
+phenoTr$type <- ifelse(phenoTr$definition=='Solid Tissue Normal', 0, 1)
+phenoTe$type <- ifelse(phenoTe$definition=='Solid Tissue Normal', 0, 1)
+
+res <- el_classifier(beta_tr = logcountsTr[sig$gene,],
+                   type_tr = phenoTr$type,
+                   beta_val = logcountsTr[sig$gene,],
+                   type_val = phenoTr$type,
+                   alpha = 0.5)
+# res$oob_auc
+# res$val_roc
+weights <- as.matrix(coef(res$fit.cv))
+weights <- weights[weights != 0,]
+weights <- weights[names(weights) != '(Intercept)']
+save(weights, file = 'out/exp-index/exp-index.Rdata')
+
+B <- logcountsTr[names(weights),]
+scale <- apply(B, 2, function(x) sum(x*weights))
+save(scale, file = 'out/exp-index/exp-index-scale.Rdata')
+
+load('out/exp-index/exp-index.Rdata')
+genes <- as.data.frame(weights) |> tibble::rownames_to_column('gene') |> dplyr::rename(coefficient = weights)
+write.table(genes, file = 'out/GeneSupp.csv',
+            sep = ',', row.names = F)
+
+```
+
+* Volcano plot with index genes highlighted
+
+```{r degplots, eval = F}
+load('out/expr/deg.Rdata')
+tmp <-  res |> as.data.frame() |>
+  tibble::rownames_to_column('gene') |> 
+  dplyr::mutate(sig = case_when(padj < 0.01 & log2FoldChange < 0 ~ 'down',
+                                padj < 0.01 & log2FoldChange > 0 ~ 'up',
+                                TRUE ~ NA)) 
+
+
+volcano <- tmp |> 
+  dplyr::mutate(lab = ifelse(-log10(pvalue) > 60, gene, ''),
+                label = ifelse(gene %in% names(weights), gene, '')) |> 
+  ggplot(aes(x = log2FoldChange,
+             y = -log10(pvalue),
+             colour = -log10(pvalue))) +
+  geom_point(aes(size = -log10(pvalue)),
+             alpha = 0.3) +
+  scale_colour_viridis_c(end = 0.85) +
+  theme_bw() +
+  scale_size_continuous(range = c(0.2, 1.5),
+                        guide = F) +
+  geom_text_repel(aes(label = label),
+                  size = 2.5,
+                  max.overlaps = 50)
+
+save(volcano, file = 'out/geneVolcano.Rdata')
+ggsave(volcano, file = 'out/plots/expVolcano.pdf',
+       width = 5.5, height = 5, units = 'in',
+       dpi = 600)
+
+# pvalHist <- tmp |> 
+#   ggplot(aes(x = pvalue)) +
+#   geom_histogram(bins = 200) +
+#   theme_bw() +
+#   labs(x = 'p value', y = 'n')
+```
+
+* Individual genes and heatmap:
+
+```{r, eval = F}
+# Sanity plots of individual genes
+tmp <- cbind(phenoTr, t(logcountsTr[names(weights),])) |> 
+  tidyr::pivot_longer(names(weights),
+                      names_to = 'gene',
+                      values_to = 'value')
+tmp |> 
+  ggplot(aes(x = as.factor(type),
+             y = value,
+             fill = as.factor(type))) +
+  geom_boxplot(outlier.shape = NA) +
+  facet_wrap(~gene, scales = 'free_y') +
+  theme_bw() +
+  theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(),
+        legend.position = 'top') +
+  scale_fill_manual(values = pals[c(1, 5)],
+                    labels = c("Control", "Case"),
+                    name = '') +
+  labs(x = '', y='log2(count+1)')
+
+tmp <- cbind(phenoTe, t(logcountsTe[names(weights),])) |> 
+  tidyr::pivot_longer(names(weights),
+                      names_to = 'gene',
+                      values_to = 'value')
+tmp |> 
+  ggplot(aes(x = as.factor(type),
+             y = value,
+             fill = as.factor(type))) +
+  geom_boxplot(outlier.shape = NA) +
+  facet_wrap(~gene, scales = 'free_y') +
+  theme_bw() +
+  theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(),
+        legend.position = 'top') +
+  scale_fill_manual(values = pals[c(1, 5)],
+                    labels = c("Control", "Case"),
+                    name = '') +
+  labs(x = '', y='log2(count+1)')
+
+# Heatmap
+library(ComplexHeatmap)
+mat <- logcountsTr[names(weights),]
+ms <- scale(mat)
+# identical(colnames(ms), phenoTr$barcode)
+anno <- columnAnnotation(type = ifelse(phenoTr$type == 0, 'Normal', 'Cancer'),
+                         col = list(type = c('Normal' = pals[1], 'Cancer' = pals[6])))
+# anno <- columnAnnotation(type = ifelse(phenoTr$tissue_type == 'Normal', 'Normal', 'Cancer'),
+#                          col = list(type = c('Normal' = pals[1], 'Cancer' = pals[6])))
+hm <- Heatmap(ms,
+        show_row_names = T,
+        show_column_names = F,
+        name = 'expression\nz-scaled',
+        row_names_gp = gpar(fontsize = 6),
+        top_annotation = anno)
+
+save(hm, file = 'out/geneEx_heatmap.Rdata')
+pdf(file = 'out/plots/expHeatmap.pdf', width = 6.5, height = 5.75)
+print(hm)
+dev.off()
+
+```
+
+Compute final index in TCGA
+
+```{r}
+ECindex.exp <- function(exp){
+  load('out/exp-index/exp-index-scale.Rdata')
+  load('out/exp-index/exp-index.Rdata')
+  intersect <- intersect(names(weights), rownames(exp))
+  intersect <- weights[intersect]
+  B <- exp[names(intersect),]
+  tmp <- apply(B, 2, function(x) sum(x*intersect))
+  out <- (tmp - mean(scale))/sd(scale)
+  
+  return(out)
+}
+
+outTr <- ECindex.exp(logcountsTr)
+outTe <- ECindex.exp(logcountsTe)
+
+tmpTr <- phenoTr
+# identical(phenoTr$barcode, names(outTr))
+tmpTr$index <- outTr
+
+tmpTe <- phenoTe
+# identical(phenoTe$barcode, names(outTe))
+tmpTe$index <- outTe
+
+data_tmp <- rbind(tmpTr, tmpTe) |> 
+  dplyr::mutate(set = assignment,
+                type = ifelse(tissue_type == 'Normal', 'Normal', 'Cancer')) |> 
+                # type = ifelse(type == 0, 'Normal', 'Cancer')) |> 
+  dplyr::select(index, barcode, type, set)
+```
+
+External validation: GEO Data -> download and compute
+
+```{r}
+# Apply in GEO data
+gse <- getGEO("GSE63678")
+geo_exp <- exprs(gse$GSE63678_series_matrix.txt.gz)
+# BiocManager::install("hgu133plus2.db")
+# BiocManager::install("affycoretools")
+library(hgu133plus2.db)
+library(affycoretools)
+
+eset <- ExpressionSet(assayData=geo_exp)
+eset <- annotateEset(eset, hgu133plus2.db)
+meta <- as.data.frame(featureData(eset)@data)
+
+ind <- match(rownames(geo_exp), meta$PROBEID)
+rownames(geo_exp) <- meta$SYMBOL
+
+pheno <- as.data.frame(phenoData(gse$GSE63678_series_matrix.txt.gz)@data)
+# identical(colnames(geo_exp), rownames(pheno))
+
+# sum(names(weights) %in% rownames(geo_exp))
+pheno$index <- ECindex.exp(geo_exp)
+
+pheno <- pheno |> 
+  dplyr::filter(`tissue:ch1` == 'endometrium') |> 
+  dplyr::mutate(set = 'external validation',
+                type = ifelse(`disease state:ch1` == 'normal', 'Normal', 'Cancer'),
+                barcode = NA) |> 
+  dplyr::select(index, set, barcode, type)
+save(pheno, file = 'out/pheno_expExtVal.Rdata')
+```
+
+Combine and plot:
+
+```{r}
+load('out/pheno_expExtVal.Rdata')
+data_exprtest <- rbind(data_tmp, pheno)|>
+  dplyr::mutate(type = factor(type, levels = c("Normal", "Cancer")),
+                set = factor(set, levels = c('training', 'testing', 'external validation')))
+
+tcga_ec_exp_boxes <- data_exprtest |>
+  ggplot(aes(x = type,
+             y = index)) +
+  geom_boxplot(aes(fill = type),
+               alpha = 0.2) +
+  ggbeeswarm::geom_quasirandom(aes(colour = type),
+                               size = 0.9) +
+  theme_bw() +
+  theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(),
+        legend.position = 'top') +
+  facet_wrap(~set) +
+  scale_fill_manual(values = pals[c(1, 6)],
+                    labels = c("Normal", "Cancer"),
+                    name = '',
+                    aesthetics = c('colour', 'fill')) +
+  labs(x = '', y='TCGA-EC expression index')
+
+save(tcga_ec_exp_boxes, file = 'out/exp_index_development.Rdata')
+ggsave(boxes, file = 'out/plots/expBoxes.pdf',
+       width = 8, height = 3.5, units = 'in',
+       dpi = 600)
+
+# AUC plots:
+source("~/Dropbox/src/plot/plot_roc_slim.R")
+
+tcga_ec_exp_auc_tr <- plot_roc(data_exprtest[data_exprtest$set == 'training',]$type,
+              data_exprtest[data_exprtest$set == 'training',]$index,
+              size = 2.8
+              ) +theme(aspect.ratio = NULL)
+tcga_ec_exp_auc_val <- plot_roc(data_exprtest[data_exprtest$set == 'testing',]$type,
+              data_exprtest[data_exprtest$set == 'testing',]$index,
+              size = 2.8
+              ) +theme(aspect.ratio = NULL)
+tcga_ec_exp_auc_extval <- plot_roc(data_exprtest[data_exprtest$set == 'external validation',]$type,
+              data_exprtest[data_exprtest$set == 'external validation',]$index,
+              size = 2.8
+              ) +theme(aspect.ratio = NULL)
+
+save(tcga_ec_exp_auc_tr, tcga_ec_exp_auc_val, tcga_ec_exp_auc_extval, file = 'out/expAUCs_plots.Rdata')
+aucs <- (tcga_ec_exp_auc_tr|tcga_ec_exp_auc_val|tcga_ec_exp_auc_extval)
+
+ggsave(aucs, file = 'out/plots/expAucs.pdf',
+       width = 8, height = 3.5, units = 'in',
+       dpi = 600)
+```
+
+# Joint figure on training AUCs with DNAme
+
+```{r}
+load('out/DNAmAUCs_plots.Rdata')
+load('out/expAUCs_plots.Rdata')
+
+load('out/geneVolcano.Rdata')
+load('out/geneEx_heatmap.Rdata')
+
+tcga_ec_auc_tr + tcga_ec_auc_val + tidyHeatmap::wrap_heatmap(hm)
+```
+
+assemble manually because heatmap otherwise can't be included.

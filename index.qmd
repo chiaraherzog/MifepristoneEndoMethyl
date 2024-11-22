@@ -1,0 +1,19 @@
+---
+title: "Molecular effects of mifepristone on DNAme and gene expression"
+---
+
+This repository describes the analysis of the molecular effects of mifepristone on the endometrium in *BRCA1/2* mutation carriers, including DNA methylation and gene expression. Please note that Partek analysis for RNA-seq is not included here and was conducted separately.
+
+1. DNA methylation data quality control and data overview
+2. Methylation indices pre and post mifepristone
+3. Differential methylation analysis
+4. Integrative analysis of transcriptome and methylation
+
+
+Figure 1: Overview of experiment, methylation data quality control (PC heatmap, PC plot ic, PC plot menstrual phase, PC plot treatment), cell type distributions
+Figure 2: Indices + DMPs (WID-EC, TCGA-EC, WID-clock, WID-rea); DMP analysis
+Figure 3: Integrative analysis - Expression; which promoter genes are associated with changes in methylation?
+Table 1: Characteristics
+
+Supplementary Figure 1: Overview luteal phase endometrial thickness
+Supplementary Figure 2: SNPs methylation, assay intensity, beta distrrbutions
