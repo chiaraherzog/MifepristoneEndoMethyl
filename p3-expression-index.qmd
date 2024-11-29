@@ -333,10 +333,15 @@ save(pheno, file = 'out/pheno_expExtVal.Rdata')
 Combine and plot:
 
 ```{r}
-load('out/pheno_expExtVal.Rdata')
-data_exprtest <- rbind(data_tmp, pheno)|>
+# load('out/pheno_expExtVal.Rdata')
+
+# data_exprtest <- rbind(data_tmp, pheno)|>
+#   dplyr::mutate(type = factor(type, levels = c("Normal", "Cancer")),
+#                 set = factor(set, levels = c('training', 'testing', 'external validation')))
+
+data_exprtest <- data_tmp |>
   dplyr::mutate(type = factor(type, levels = c("Normal", "Cancer")),
-                set = factor(set, levels = c('training', 'testing', 'external validation')))
+                set = factor(set, levels = c('training', 'testing')))
 
 tcga_ec_exp_boxes <- data_exprtest |>
   ggplot(aes(x = type,
@@ -356,7 +361,7 @@ tcga_ec_exp_boxes <- data_exprtest |>
   labs(x = '', y='TCGA-EC expression index')
 
 save(tcga_ec_exp_boxes, file = 'out/exp_index_development.Rdata')
-ggsave(boxes, file = 'out/plots/expBoxes.pdf',
+ggsave(tcga_ec_exp_boxes, file = 'out/plots/expBoxes.pdf',
        width = 8, height = 3.5, units = 'in',
        dpi = 600)
 
@@ -371,13 +376,13 @@ tcga_ec_exp_auc_val <- plot_roc(data_exprtest[data_exprtest$set == 'testing',]$t
               data_exprtest[data_exprtest$set == 'testing',]$index,
               size = 2.8
               ) +theme(aspect.ratio = NULL)
-tcga_ec_exp_auc_extval <- plot_roc(data_exprtest[data_exprtest$set == 'external validation',]$type,
-              data_exprtest[data_exprtest$set == 'external validation',]$index,
-              size = 2.8
-              ) +theme(aspect.ratio = NULL)
+# tcga_ec_exp_auc_extval <- plot_roc(data_exprtest[data_exprtest$set == 'external validation',]$type,
+#               data_exprtest[data_exprtest$set == 'external validation',]$index,
+#               size = 2.8
+#               ) +theme(aspect.ratio = NULL)
 
-save(tcga_ec_exp_auc_tr, tcga_ec_exp_auc_val, tcga_ec_exp_auc_extval, file = 'out/expAUCs_plots.Rdata')
-aucs <- (tcga_ec_exp_auc_tr|tcga_ec_exp_auc_val|tcga_ec_exp_auc_extval)
+save(tcga_ec_exp_auc_tr, tcga_ec_exp_auc_val, file = 'out/expAUCs_plots.Rdata')
+aucs <- (tcga_ec_exp_auc_tr|tcga_ec_exp_auc_val)
 
 ggsave(aucs, file = 'out/plots/expAucs.pdf',
        width = 8, height = 3.5, units = 'in',
