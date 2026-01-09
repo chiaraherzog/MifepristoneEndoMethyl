@@ -65,7 +65,8 @@ age <- readxl::read_xlsx(file.path(db_path, "data/mifepristone/endometrium/pheno
                 med = `concomittant med`) |> 
   dplyr::select(id, age, bmi, us, mens_phase, disease, med) |>
   dplyr::mutate(mens_phase = dplyr::case_when(mens_phase == '?' ~ 'unknown',
-                                       mens_phase %in% c("no menstruation", "not regular menstruation, 5 weeks since last") ~ "irregular or no menstruation",
+                                       mens_phase %in% c("no menstruation") ~ "no menstruation",
+                                       mens_phase == "not regular menstruation, 5 weeks since last" ~ 'irregular menstruation',
                                        mens_phase == 'midcycle' ~ "mid luteal",
                                        TRUE ~ mens_phase))
 
@@ -111,6 +112,13 @@ pheno <- cbind(pheno, as.data.frame(eutopssrc::PROSENPCGT_age(beta_merged)))
 pheno <- eutopssrc::hEpiDISH(beta_merged, pheno)
 library(WIDclocks)
 pheno <- cbind(pheno, as.data.frame(WIDclocks::WID_clocks(beta_merged)))
+
+# Adding PRBS in review:
+
+prbs <- eutopssrc::prbs(beta_merged)
+pheno$prbs_all <- prbs$PRBS
+pheno$prbs_hypoM <- prbs$PRBS_hypoM
+
 ```
 
 ### Save analysis data
@@ -121,7 +129,8 @@ data <- pheno |>
   dplyr::mutate(time = factor(time, levels = c('pre', 'post')),
                 trt = factor(trt, levels = c("Vitamin B", "Mifepristone")),
                 mens_phase = factor(mens_phase, levels = c('unknown',
-                                                           'irregular or no menstruation',
+                                                           'no menstruation',
+                                                           'irregular menstruation',
                                                            'early luteal',
                                                            'mid luteal',
                                                            'late luteal',
@@ -146,6 +155,7 @@ One sample is provided in duplicates. Let's check array intensities and replicat
 
 ```{r arrayintensities.dupe, fig.width = 12, fig.height = 3.9}
 load("out/report/Log/MifeEndometrium_qc.Rdata")
+
 tmp <- qc |> as.data.frame() |> 
   tibble::rownames_to_column('basename') |> 
   dplyr::left_join(data, by = 'basename')
@@ -162,7 +172,6 @@ assayIntensity <- tmp |>
   scale_color_viridis_d() +
   labs(x = 'median intensity<br><b>methylated</b>',
        y = 'median intensity<br><b>unmethylated</b>')
-
 
 dupe <- tmp |> 
   janitor::get_dupes(id) |> 
@@ -268,6 +277,14 @@ library(gtsummary)
 
 theme_gtsummary_compact()
 
+data <- data |> dplyr::mutate(mens_phase = factor(mens_phase, levels = c("early luteal",
+                                                                         "mid luteal", 
+                                                                         "late luteal",
+                                                                         "ongoing menstruation",
+                                                                         "irregular menstruation",
+                                                                         "no menstruation",
+                                                                         "unknown")))
+
 a <- data |> 
   dplyr::filter(trt == 'Mifepristone') |> 
   dplyr::select(age, bmi, time, mens_phase, us) |> 
@@ -290,7 +307,17 @@ b <- data |>
                                       bmi = 'BMI',
                                       us = 'Ultrasound thickness (mm)'))
 
-tbl_merge(list(b, a), tab_spanner = c("Vitamin B", "Mifepristone"))
+# tbl_merge(list(b, a), tab_spanner = c("Vitamin B", "Mifepristone"))
+
+t <- tbl_merge(list(b, a), tab_spanner = c("Vitamin B", "Mifepristone")) |> as_gt()
+
+
+t |> text_replace(
+    pattern = "0 \\(0%\\)",
+    replacement = "-",
+    locations = cells_body(columns = everything(),
+                           rows = everything())
+  ) |> opt_row_striping() |> opt_stylize(style = 3,color = 'blue') 
 ```
 
 It is worth noting that all women post mifepristone exhibit irregular or no menstruation (in line with its potential as a contraceptive?). Endometrial thickness seems slightly elevated.
@@ -497,7 +524,8 @@ time <- data |>
 
 
 cols <- c("unknown" = 'grey70',
-          'irregular or no menstruation' = '#A28A2D',
+          'no menstruation' = '#A28A2D',
+          'irregular menstruation' = 'magenta',
           'early luteal' = '#001959',
           'mid luteal' = '#2C635B',
           'late luteal' = '#FDB1AB',
@@ -681,6 +709,26 @@ ggsave(fig, filename = 'figures-pdf/fig1.png',
        units = 'in')
 ```
 
+Source data:
+
+```{r}
+# B --------
+out <- pcTile$data
+write.table(out, file = 'SourceData/1b.txt', quote = F, sep = '\t', row.names = F)
+
+# C --------
+out <- ic$data |> dplyr::select(PC1, PC2, ic)
+write.table(out, file = 'SourceData/1c.txt', quote = F, sep = '\t', row.names = F)
+
+# D --------
+out <- time$data |> dplyr::select(PC1, PC2, trt, time)
+write.table(out, file = 'SourceData/1d.txt', quote = F, sep = '\t', row.names = F)
+
+# E --------
+out <- p$data |> dplyr::select(PC1, PC2, mens_phase)
+write.table(out, file = 'SourceData/1e.txt', quote = F, sep = '\t', row.names = F)
+```
+
 ### Supplementary Figure 2
 
 ```{r usthickness, fig.width = 2.5, fig.height = 41}
@@ -689,6 +737,13 @@ ggsave(usthickness, filename = 'figures-pdf/suppl_fig2.png',
        width = 2.5,
        height = 4.1,
        units = 'in')
+```
+
+* Source data export
+
+```{r}
+out <- usthickness$data |> dplyr::select(us, mens_phase)
+write.table(out, file = 'SourceData/s2.txt', quote = F, sep = '\t', row.names = F)
 ```
 
 ### Supplementary Figure 3
@@ -711,6 +766,45 @@ ggsave(suppl_fig2, filename = 'figures-pdf/suppl_fig3.png',
        width = 12,
        height = 9,
        units = 'in')
+```
+
+Source Data Export
+
+```{r}
+# A --------
+out <- snps$data |> 
+  # dplyr::mutate(anon_rsid = as.integer(factor(rs))) |> 
+  dplyr::mutate(anon_rsid = sample.int(n_distinct(rs))[match(rs, unique(rs))])
+write.table(out, file = 'SourceData/s3a.txt', quote = F, sep = '\t', row.names = F)
+
+# B --------
+out <- assayIntensity$data |> dplyr::select(mMed, uMed)
+write.table(out, file = 'SourceData/s3b.txt', quote = F, sep = '\t', row.names = F)
+
+# C --------
+out <- betaDist$data |> dplyr::group_by(basename) |> 
+  dplyr::mutate(sample = dplyr::cur_group_id()) |>
+  dplyr::ungroup() |> 
+  dplyr::select(sample, x, y, ic) |> 
+  dplyr::rename(beta = x, density = y)
+write.table(out, file = 'SourceData/s3c.txt', quote = F, sep = '\t', row.names = F)
+```
+
+Source data figure 3:
+
+```{r}
+# 1 --------
+out <- celltypesPrePost$data |>
+  dplyr::group_by(participant_id) |> 
+  dplyr::mutate(participant = dplyr::cur_group_id()) |>
+  dplyr::ungroup() |> 
+  dplyr::select(participant, celltype, cell_prop, time)
+write.table(out, file = 'SourceData/3_panel1.txt', quote = F, sep = '\t', row.names = F)
+
+# 2 --------
+out <- celltypesDelta$data |> 
+  dplyr::select(-c(participant_id, pre, post))
+write.table(out, file = 'SourceData/3_panel2.txt', quote = F, sep = '\t', row.names = F)
 ```
 
 :::

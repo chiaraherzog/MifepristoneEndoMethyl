@@ -7,3 +7,5 @@
 /GDCdata/*
 /out/*
 .DS_Store
+SourceData/*
+*.pdf

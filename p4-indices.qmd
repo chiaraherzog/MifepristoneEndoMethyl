@@ -33,7 +33,7 @@ suppressMessages(suppressWarnings({
 
 ```{r, fig.width=10, fig.height = 10}
 tmp <- data |>
-  tidyr::pivot_longer(c(TCGA_EC),
+  tidyr::pivot_longer(c(TCGA_EC, prbs_all, prbs_hypoM),
                       names_to = 'index',
                       values_to = 'value')
 
@@ -78,7 +78,7 @@ tmp |>
 We can adjust all indices with a script:
 
 ```{r}
-indices <- colnames(data)[c(17:34, 44:48)]
+indices <- colnames(data)[c(17:34, 44:50)]
 
 data2 <- data |>
   dplyr::mutate(type = ifelse(time == 'pre', 'Control', "Post")) |> 
@@ -182,6 +182,185 @@ ggsave(plot, file = 'out/DNAmIndex.png',
 
 ```
 
+
+Source data figure 4:
+
+```{r}
+# A --------
+out <- tcga_ec_boxes$data |> 
+  tibble::rownames_to_column('TCGA id')
+write.table(out, file = 'SourceData/4a.txt', quote = F, sep = '\t', row.names = F)
+
+# B --------
+out <- indexPrePost$data |> 
+  dplyr::filter(index == 'TCGA-EC')|>
+  dplyr::group_by(participant_id) |> 
+  dplyr::mutate(participant = dplyr::cur_group_id()) |>
+  dplyr::ungroup() |> 
+  dplyr::select(participant, value, trt, time)
+write.table(out, file = 'SourceData/4b.txt', quote = F, sep = '\t', row.names = F)
+
+# C --------
+out <- indexDiff$data |> 
+  dplyr::select(-c(participant_id, pre, post))
+write.table(out, file = 'SourceData/4c.txt', quote = F, sep = '\t', row.names = F)
+```
+
+
+```{r unadj.prbs}
+indexPrePost <- tmp |> 
+  dplyr::filter(index == 'prbs_all') |> 
+  # dplyr::filter(!grepl("idx_", index) & !grepl("ria|immune_age", index)) |> 
+  dplyr::mutate(index = gsub("_", "-", index),
+                index = stringr::str_wrap(index, width = 15, whitespace_only = F)) |> 
+  ggplot(aes(x = time,
+             y = value)) +
+  geom_boxplot(aes(fill = trt),
+               outlier.shape = NA,
+               alpha = 0.6) +
+  geom_line(aes(group = participant_id,
+                colour = trt),
+            alpha = 0.3) +
+  facet_grid(index~trt,
+             scales = 'free_y') +
+  ggpubr::stat_compare_means(
+    comparisons = list(c('pre', 'post')),
+                             # ref.group = 'pre',
+                             paired = T,
+                             label = 'p.format',
+                             label.y.npc = 0.93,
+    size = 2.8) +
+  labs(x = '',
+       y = 'Value (unadjusted)') +
+  theme_bw() +
+  theme(legend.position = 'none') +
+  scale_y_continuous(expand = c(0.12, 0.12)) +
+  coord_cartesian(expand = T,
+                  clip = 'off') +
+  scale_fill_manual(values = cols_trt,
+                    aesthetics = c('colour', 'fill'))
+
+
+tmp2 <- tmp |> 
+  dplyr::filter(index == 'prbs_all') |> 
+  # dplyr::filter(!grepl("idx_", index)& !grepl("ria|immune_age", index)) |>
+  tidyr::pivot_wider(id_cols = c('participant_id', 'trt', 'index'),
+                     names_from = 'time',
+                     values_from = 'value') |> 
+  dplyr::rowwise() |> 
+  dplyr::mutate(d = post-pre) |> 
+  dplyr::ungroup()
+
+indexDiff <- tmp2 |> 
+  dplyr::mutate(index = gsub("_", "-", index),
+                index = stringr::str_wrap(index, width = 15, whitespace_only = F)) |> 
+  ggplot(aes(x = trt,
+             y = d)) +
+  geom_hline(yintercept = 0,
+             linetype = 'dashed',
+             alpha = 0.3) +
+  geom_boxplot(aes(fill = trt),
+               outlier.shape = NA,
+               alpha = 0.6) +
+  ggbeeswarm::geom_quasirandom(aes(colour = trt)) +
+  facet_grid(index~'∆ time',
+             scales = 'free_y') +
+  ggpubr::stat_compare_means(comparisons = list(c('Vitamin B', "Mifepristone")),
+                             paired = F,
+                             label = 'p.format',
+                             size = 2.8) +
+  scale_y_continuous(expand = c(0.12, 0.12)) +
+  labs(x = '',
+       y = '∆ post-pre (unadjusted)') +
+  theme_bw() +
+  theme(legend.position = 'right',
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank()) +
+  scale_fill_manual(values = cols_trt,
+                    aesthetics = c('fill', 'colour'),
+                    name = 'Treatment')
+
+(indexPrePost | indexDiff) +plot_layout(widths = c(1, 0.5))
+```
+
+
+```{r unadj.prbs.hypo}
+indexPrePost <- tmp |> 
+  dplyr::filter(index == 'prbs_hypoM') |> 
+  # dplyr::filter(!grepl("idx_", index) & !grepl("ria|immune_age", index)) |> 
+  dplyr::mutate(index = gsub("_", "-", index),
+                index = stringr::str_wrap(index, width = 15, whitespace_only = F)) |> 
+  ggplot(aes(x = time,
+             y = value)) +
+  geom_boxplot(aes(fill = trt),
+               outlier.shape = NA,
+               alpha = 0.6) +
+  geom_line(aes(group = participant_id,
+                colour = trt),
+            alpha = 0.3) +
+  facet_grid(index~trt,
+             scales = 'free_y') +
+  ggpubr::stat_compare_means(
+    comparisons = list(c('pre', 'post')),
+                             # ref.group = 'pre',
+                             paired = T,
+                             label = 'p.format',
+                             label.y.npc = 0.93,
+    size = 2.8) +
+  labs(x = '',
+       y = 'Value (unadjusted)') +
+  theme_bw() +
+  theme(legend.position = 'none') +
+  scale_y_continuous(expand = c(0.12, 0.12)) +
+  coord_cartesian(expand = T,
+                  clip = 'off') +
+  scale_fill_manual(values = cols_trt,
+                    aesthetics = c('colour', 'fill'))
+
+
+tmp2 <- tmp |> 
+  dplyr::filter(index == 'prbs_hypoM') |> 
+  # dplyr::filter(!grepl("idx_", index)& !grepl("ria|immune_age", index)) |>
+  tidyr::pivot_wider(id_cols = c('participant_id', 'trt', 'index'),
+                     names_from = 'time',
+                     values_from = 'value') |> 
+  dplyr::rowwise() |> 
+  dplyr::mutate(d = post-pre) |> 
+  dplyr::ungroup()
+
+indexDiff <- tmp2 |> 
+  dplyr::mutate(index = gsub("_", "-", index),
+                index = stringr::str_wrap(index, width = 15, whitespace_only = F)) |> 
+  ggplot(aes(x = trt,
+             y = d)) +
+  geom_hline(yintercept = 0,
+             linetype = 'dashed',
+             alpha = 0.3) +
+  geom_boxplot(aes(fill = trt),
+               outlier.shape = NA,
+               alpha = 0.6) +
+  ggbeeswarm::geom_quasirandom(aes(colour = trt)) +
+  facet_grid(index~'∆ time',
+             scales = 'free_y') +
+  ggpubr::stat_compare_means(comparisons = list(c('Vitamin B', "Mifepristone")),
+                             paired = F,
+                             label = 'p.format',
+                             size = 2.8) +
+  scale_y_continuous(expand = c(0.12, 0.12)) +
+  labs(x = '',
+       y = '∆ post-pre (unadjusted)') +
+  theme_bw() +
+  theme(legend.position = 'right',
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank()) +
+  scale_fill_manual(values = cols_trt,
+                    aesthetics = c('fill', 'colour'),
+                    name = 'Treatment')
+
+(indexPrePost | indexDiff) +plot_layout(widths = c(1, 0.5))
+```
+
+
 ### Adjusted values (age and ic)
 
 ```{r adj, fig.width = 6, fig.height = 9.8}
@@ -192,7 +371,7 @@ tmp <- data2 |>
 
 a <- tmp |> 
   dplyr::filter(index == 'TCGA_EC_adj') |> 
-  dplyr::mutate(index = 'TCGA-EC (adjusted)')
+  dplyr::mutate(index = 'TCGA-EC (adjusted)') |> 
   # dplyr::filter(!grepl("idx_", index) & !grepl("ria|immune_age", index)) |> 
   ggplot(aes(x = time,
              y = value)) +
@@ -231,7 +410,7 @@ tmp2 <- tmp |>
   dplyr::mutate(d = post-pre) |> 
   dplyr::ungroup()
 
-b <- tmp2 |> 
+b <- tmp2 |> dplyr::filter(index == 'TCGA_EC_adj') |> 
   ggplot(aes(x = trt,
              y = d)) +
   geom_hline(yintercept = 0,
@@ -243,7 +422,7 @@ b <- tmp2 |>
   ggbeeswarm::geom_quasirandom(aes(colour = trt)) +
   facet_grid(index~'∆ time',
              scales = 'free_y') +
-  ggpubr::stat_compare_means(comparisons = list(c('Vitamin B', "Mifepristone")),
+  ggpubr::stat_compare_means(comparisons = list(c('VitaminB', "Mifepristone")),
                              paired = F,
                              label = 'p.format',
                              size = 2.8) +
@@ -260,8 +439,7 @@ b <- tmp2 |>
 
 (a|b) + plot_layout(widths = c(1.5, 1)) +
   plot_annotation(tag_levels = c('a'))
-
-<!-- ``` -->
+```
 
 ### Adjusting for age and fibroblast proportion
 
@@ -341,7 +519,7 @@ dnam_adj_delta <- tmp2 |>
   ggbeeswarm::geom_quasirandom(aes(colour = trt)) +
   facet_grid(index~'∆ time',
              scales = 'free_y') +
-  ggpubr::stat_compare_means(comparisons = list(c('Vitamin B', "Mifepristone")),
+  ggpubr::stat_compare_means(comparisons = list(c('VitaminB', "Mifepristone")),
                              paired = F,
                              label = 'p.format',
                              size = 2.8) +
@@ -356,9 +534,155 @@ dnam_adj_delta <- tmp2 |>
                     aesthetics = c('fill', 'colour'),
                     name = 'Treatment')
 
-# (a|b) + plot_layout(widths = c(1.5, 1)) +
-#   plot_annotation(tag_levels = c('a'))
+(dnam_adj_all|dnam_adj_delta) + plot_layout(widths = c(1.5, 1)) +
+  plot_annotation(tag_levels = c('a'))
+```
 
+```{r adj.prbs}
+dnam_adj_all <- tmp |> 
+  dplyr::filter(index == 'prbs_all_adj') |> 
+  dplyr::mutate(index = 'PRBS') |> 
+  ggplot(aes(x = time,
+             y = value)) +
+  geom_boxplot(aes(fill = trt),
+               outlier.shape = NA,
+               alpha = 0.6) +
+  geom_line(aes(group = participant_id,
+                colour = trt),
+            alpha = 0.3) +
+  facet_grid(index~trt,
+             scales = 'free_y') +
+  ggpubr::stat_compare_means(
+    comparisons = list(c('pre', 'post')),
+                             # ref.group = 'pre',
+                             paired = T,
+                             label = 'p.signif',
+                             label.y.npc = 0.93) +
+  labs(x = '',
+       y = 'Value (adjusted)') +
+  theme_bw() +
+  theme(legend.position = 'none') +
+  scale_y_continuous(expand = c(0.09, 0.09)) +
+  coord_cartesian(expand = T,
+                  clip = 'off') +
+  scale_fill_manual(values = cols_trt,
+                    aesthetics = c('colour', 'fill'))
+
+
+tmp2 <- tmp |> 
+  # dplyr::filter(!grepl("idx_", index)) |> 
+  dplyr::filter(index == 'prbs_all_adj') |> 
+  dplyr::mutate(index = 'PRBS') |> 
+  tidyr::pivot_wider(id_cols = c('participant_id', 'trt', 'index'),
+                     names_from = 'time',
+                     values_from = 'value') |> 
+  dplyr::rowwise() |> 
+  dplyr::mutate(d = post-pre) |> 
+  dplyr::ungroup()
+
+dnam_adj_delta <- tmp2 |> 
+  ggplot(aes(x = trt,
+             y = d)) +
+  geom_hline(yintercept = 0,
+             linetype = 'dashed',
+             alpha = 0.3) +
+  geom_boxplot(aes(fill = trt),
+               outlier.shape = NA,
+               alpha = 0.6) +
+  ggbeeswarm::geom_quasirandom(aes(colour = trt)) +
+  facet_grid(index~'∆ time',
+             scales = 'free_y') +
+  ggpubr::stat_compare_means(comparisons = list(c('VitaminB', "Mifepristone")),
+                             paired = F,
+                             label = 'p.format',
+                             size = 2.8) +
+  scale_y_continuous(expand = c(0.09, 0.09)) +
+  labs(x = '',
+       y = '∆ post-pre (adjusted)') +
+  theme_bw() +
+  theme(legend.position = 'right',
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank()) +
+  scale_fill_manual(values = cols_trt,
+                    aesthetics = c('fill', 'colour'),
+                    name = 'Treatment')
+
+(dnam_adj_all|dnam_adj_delta) + plot_layout(widths = c(1.5, 1)) +
+  plot_annotation(tag_levels = c('a'))
+```
+
+```{r adj.prbs.hypo}
+
+dnam_adj_all <- tmp |> 
+  dplyr::filter(index == 'prbs_hypoM_adj') |> 
+  dplyr::mutate(index = 'PRBS (hypoM)') |> 
+  ggplot(aes(x = time,
+             y = value)) +
+  geom_boxplot(aes(fill = trt),
+               outlier.shape = NA,
+               alpha = 0.6) +
+  geom_line(aes(group = participant_id,
+                colour = trt),
+            alpha = 0.3) +
+  facet_grid(index~trt,
+             scales = 'free_y') +
+  ggpubr::stat_compare_means(
+    comparisons = list(c('pre', 'post')),
+                             # ref.group = 'pre',
+                             paired = T,
+                             label = 'p.signif',
+                             label.y.npc = 0.93) +
+  labs(x = '',
+       y = 'Value (adjusted)') +
+  theme_bw() +
+  theme(legend.position = 'none') +
+  scale_y_continuous(expand = c(0.09, 0.09)) +
+  coord_cartesian(expand = T,
+                  clip = 'off') +
+  scale_fill_manual(values = cols_trt,
+                    aesthetics = c('colour', 'fill'))
+
+
+tmp2 <- tmp |> 
+  # dplyr::filter(!grepl("idx_", index)) |> 
+  dplyr::filter(index == 'prbs_hypoM_adj') |> 
+  dplyr::mutate(index = 'PRBS (hypoM)') |> 
+  tidyr::pivot_wider(id_cols = c('participant_id', 'trt', 'index'),
+                     names_from = 'time',
+                     values_from = 'value') |> 
+  dplyr::rowwise() |> 
+  dplyr::mutate(d = post-pre) |> 
+  dplyr::ungroup()
+
+dnam_adj_delta <- tmp2 |> 
+  ggplot(aes(x = trt,
+             y = d)) +
+  geom_hline(yintercept = 0,
+             linetype = 'dashed',
+             alpha = 0.3) +
+  geom_boxplot(aes(fill = trt),
+               outlier.shape = NA,
+               alpha = 0.6) +
+  ggbeeswarm::geom_quasirandom(aes(colour = trt)) +
+  facet_grid(index~'∆ time',
+             scales = 'free_y') +
+  ggpubr::stat_compare_means(comparisons = list(c('VitaminB', "Mifepristone")),
+                             paired = F,
+                             label = 'p.format',
+                             size = 2.8) +
+  scale_y_continuous(expand = c(0.09, 0.09)) +
+  labs(x = '',
+       y = '∆ post-pre (adjusted)') +
+  theme_bw() +
+  theme(legend.position = 'right',
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank()) +
+  scale_fill_manual(values = cols_trt,
+                    aesthetics = c('fill', 'colour'),
+                    name = 'Treatment')
+
+(dnam_adj_all|dnam_adj_delta) + plot_layout(widths = c(1.5, 1)) +
+  plot_annotation(tag_levels = c('a'))
 ```
 
 :::
@@ -382,6 +706,7 @@ colnames(counts) <- paste0("BRCAmut_", colnames(counts))
 counts <- counts[,data$id]
 # identical(colnames(counts), data$id)
 
+library(DESeq2)
 dds <- DESeqDataSetFromMatrix(countData = round(counts),
                               colData = data,
                               design = ~ 1)
@@ -510,6 +835,25 @@ ggsave(plot, file = 'out/GeneExpIndex.png',
 
 ```
 
+```{r}
+# A --------
+out <- tcga_ec_exp_boxes$data
+write.table(out, file = 'SourceData/5a.txt', quote = F, sep = '\t', row.names = F)
+
+# B --------
+out <- unadj_exp$data |> 
+  dplyr::group_by(participant_id) |> 
+  dplyr::mutate(participant = dplyr::cur_group_id()) |>
+  dplyr::ungroup() |> 
+  dplyr::select(participant, value, trt, time)
+write.table(out, file = 'SourceData/5b.txt', quote = F, sep = '\t', row.names = F)
+
+# C --------
+out <- unadj_exp_prepost$data |> 
+  dplyr::select(-c(participant_id, index, pre, post))
+write.table(out, file = 'SourceData/5c.txt', quote = F, sep = '\t', row.names = F)
+```
+
 
 
 Adjusted indices (both DNAm and Gene expression):
@@ -526,6 +870,7 @@ tmp <- data2 |>
   dplyr::mutate(index = ifelse(index == 'TCGA_EC_adj', 'TCGA-EC methylation index', 'TCGA-EC expression index'),
                 index = factor(index, levels = c("TCGA-EC methylation index", 'TCGA-EC expression index')))
 
+library(ggh4x)
 strip <- strip_themed(background_y = elem_list_rect(fill = c("grey90", "skyblue")))
 
 comp1 <- tmp |> 
@@ -602,4 +947,21 @@ plot <- (comp1+comp2) +
 
 ggsave(plot, file = 'out/AdjustedValues.png',
        dpi = 300, width = 7.5, height = 4.5)
+```
+
+Source data figure S5:
+
+```{r}
+# A --------
+out <- comp1$data |> 
+  dplyr::group_by(participant_id) |> 
+  dplyr::mutate(participant = dplyr::cur_group_id()) |>
+  dplyr::ungroup() |> 
+  dplyr::select(participant, index, value, trt, time)
+write.table(out, file = 'SourceData/s5a.txt', quote = F, sep = '\t', row.names = F)
+
+# B --------
+out <- comp2$data |> 
+  dplyr::select(trt, index, d)
+write.table(out, file = 'SourceData/s5b.txt', quote = F, sep = '\t', row.names = F)
 ```

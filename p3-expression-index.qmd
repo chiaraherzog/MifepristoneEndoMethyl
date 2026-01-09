@@ -212,7 +212,7 @@ tmp <- cbind(phenoTr, t(logcountsTr[names(weights),])) |>
 tmp |> 
   ggplot(aes(x = as.factor(type),
              y = value,
-             fill = as.factor(type))) +
+             fill = as.factor(type)))+
   geom_boxplot(outlier.shape = NA) +
   facet_wrap(~gene, scales = 'free_y') +
   theme_bw() +
@@ -261,7 +261,18 @@ save(hm, file = 'out/geneEx_heatmap.Rdata')
 pdf(file = 'out/plots/expHeatmap.pdf', width = 6.5, height = 5.75)
 print(hm)
 dev.off()
+```
 
+Source data export:
+
+```{r}
+# S4C --------
+out <- volcano$data
+write.table(out, file = 'SourceData/s4c.txt', quote = F, sep = '\t', row.names = F)
+
+# S4D--------
+out <- mat
+write.table(out, file = 'SourceData/s4d.txt', quote = F, sep = '\t', row.names = F)
 ```
 
 Compute final index in TCGA
