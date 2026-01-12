@@ -494,10 +494,6 @@ Source data export:
 
 ```{r}
 # A --------
-out <- data_full |> dplyr::filter(set == 'training') |> dplyr::select(type, TCGA_EC) |> tibble::rownames_to_column('barcode')
+out <- data_full |> dplyr::select(set, type, TCGA_EC) |> tibble::rownames_to_column('barcode')
 write.table(out, file = 'SourceData/s4a.txt', quote = F, sep = '\t', row.names = F)
-
-# B --------
-out <- data_full |> dplyr::filter(set == 'testing') |> dplyr::select(type, TCGA_EC) |> tibble::rownames_to_column('barcode')
-write.table(out, file = 'SourceData/s4b.txt', quote = F, sep = '\t', row.names = F)
 ```

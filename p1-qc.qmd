@@ -774,7 +774,11 @@ Source Data Export
 # A --------
 out <- snps$data |> 
   # dplyr::mutate(anon_rsid = as.integer(factor(rs))) |> 
-  dplyr::mutate(anon_rsid = sample.int(n_distinct(rs))[match(rs, unique(rs))])
+  dplyr::mutate(anon_rsid = sample.int(n_distinct(rs))[match(rs, unique(rs))]) |> 
+  dplyr::group_by(participant_id) |> 
+  dplyr::mutate(id = dplyr::cur_group_id()) |> 
+  dplyr::ungroup() |> 
+  dplyr::select(id, anon_rsid, post, pre)
 write.table(out, file = 'SourceData/s3a.txt', quote = F, sep = '\t', row.names = F)
 
 # B --------

@@ -271,7 +271,8 @@ out <- volcano$data
 write.table(out, file = 'SourceData/s4c.txt', quote = F, sep = '\t', row.names = F)
 
 # S4D--------
-out <- mat
+out <- mat |> 
+  as.data.frame() |> tibble::rownames_to_column('gene')
 write.table(out, file = 'SourceData/s4d.txt', quote = F, sep = '\t', row.names = F)
 ```
 
@@ -398,6 +399,23 @@ aucs <- (tcga_ec_exp_auc_tr|tcga_ec_exp_auc_val)
 ggsave(aucs, file = 'out/plots/expAucs.pdf',
        width = 8, height = 3.5, units = 'in',
        dpi = 600)
+```
+
+Source data export:
+
+```{r}
+# S4B --------
+out <- data_exprtest |> dplyr::select(set, type, index) |> 
+  dplyr::rename(TCGA_EC_expression = index) |> tibble::rownames_to_column('barcode')
+write.table(out, file = 'SourceData/s4b.txt', quote = F, sep = '\t', row.names = F)
+
+# S4C --------
+out <- volcano$data
+write.table(out, file = 'SourceData/s4c.txt', quote = F, sep = '\t', row.names = F)
+
+# S4D--------
+out <- mat
+write.table(out, file = 'SourceData/s4d.txt', quote = F, sep = '\t', row.names = F)
 ```
 
 # Joint figure on training AUCs with DNAme
